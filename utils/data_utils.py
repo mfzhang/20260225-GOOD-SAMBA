@@ -74,13 +74,22 @@ def prepare_data(csv_file, window=5, predict=1, test_ratio=0.15, val_ratio=0.05)
     # Convert to numpy
     a = X.to_numpy()
     
-    # Normalize data
+    # Split sizes (based on number of sequences)
+    ran = a.shape[0]
+    n_seq = ran - window
+    test_len = int(test_ratio * n_seq)
+    val_len = int(val_ratio * n_seq)
+    train_len = n_seq - test_len - val_len
+    
+    # Fit normalizer on training slice only
     mmn = MinMaxNorm01()
-    data = a
-    dataset = mmn.fit_transform(data)
+    train_start = test_len
+    train_last_i = test_len + train_len - 1
+    train_end = min(ran, train_last_i + window + predict)
+    mmn.fit(a[train_start:train_end])
+    dataset = mmn.transform(a)
     
     # Create sequences
-    ran = data.shape[0]
     i = 0
     X_seq = []
     Y_seq = []
@@ -93,11 +102,6 @@ def prepare_data(csv_file, window=5, predict=1, test_ratio=0.15, val_ratio=0.05)
     XX = torch.stack(X_seq, dim=0)
     YY = torch.stack(Y_seq, dim=0)
     YY = YY[:, :, None]
-    
-    # Split data
-    test_len = int(test_ratio * XX.shape[0])
-    val_len = int(val_ratio * XX.shape[0])
-    train_len = XX.shape[0] - test_len - val_len
     
     # Create tensors
     X_test = torch.Tensor.float(XX[:test_len, :, :]).cuda()
