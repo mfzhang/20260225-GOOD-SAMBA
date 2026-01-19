@@ -20,7 +20,11 @@ class MinMaxNorm01:
         self.max = x.max()
     
     def transform(self, x):
-        x = 1.0 * (x - self.min) / (self.max - self.min)
+        diff = self.max - self.min
+        # Handle case where max == min (constant feature)
+        if diff == 0:
+            return np.zeros_like(x)
+        x = 1.0 * (x - self.min) / diff
         return x
     
     def fit_transform(self, x):
@@ -74,48 +78,76 @@ def prepare_data(csv_file, window=5, predict=1, test_ratio=0.15, val_ratio=0.05)
     # Convert to numpy
     a = X.to_numpy()
     
-    # Split sizes (based on number of sequences)
+    # Calculate split sizes (based on number of sequences)
     ran = a.shape[0]
     n_seq = ran - window
     test_len = int(test_ratio * n_seq)
     val_len = int(val_ratio * n_seq)
     train_len = n_seq - test_len - val_len
     
-    # Fit normalizer on training slice only
+    # Split raw data first: determine split points in raw data
+    # Test: first test_len sequences -> raw data points [0 : test_len + window]
+    # Train: next train_len sequences -> raw data points [test_len : test_len + train_len + window]
+    # Val: last val_len sequences -> raw data points [test_len + train_len : end]
+    
+    test_end_idx = test_len + window
+    train_start_idx = test_len
+    train_end_idx = test_len + train_len + window
+    val_start_idx = test_len + train_len
+    
+    # Split raw data
+    a_test = a[:test_end_idx]
+    a_train = a[train_start_idx:train_end_idx]
+    a_val = a[val_start_idx:]
+    
+    # Fit normalizer on training data only
     mmn = MinMaxNorm01()
-    train_start = test_len
-    train_last_i = test_len + train_len - 1
-    train_end = min(ran, train_last_i + window + predict)
-    mmn.fit(a[train_start:train_end])
-    dataset = mmn.transform(a)
+    mmn.fit(a_train)
     
-    # Create sequences
-    i = 0
-    X_seq = []
-    Y_seq = []
+    # Transform each split separately using the same normalizer
+    a_test_norm = mmn.transform(a_test)
+    a_train_norm = mmn.transform(a_train)
+    a_val_norm = mmn.transform(a_val)
     
-    while i + window < ran:
-        X_seq.append(torch.Tensor(dataset[i:i+window, 1:]))
-        Y_seq.append(torch.Tensor(dataset[i+window:i+window+predict, 0]))
-        i += 1
+    # Create sequences from each normalized split
+    def create_sequences(data, start_offset=0):
+        """Create sequences from normalized data"""
+        X_seq = []
+        Y_seq = []
+        data_len = data.shape[0]
+        i = start_offset
+        while i + window < data_len:
+            X_seq.append(torch.Tensor(data[i:i+window, 1:]))
+            Y_seq.append(torch.Tensor(data[i+window:i+window+predict, 0]))
+            i += 1
+        if len(X_seq) > 0:
+            XX = torch.stack(X_seq, dim=0)
+            YY = torch.stack(Y_seq, dim=0)
+            YY = YY[:, :, None]
+            return XX, YY
+        return None, None
     
-    XX = torch.stack(X_seq, dim=0)
-    YY = torch.stack(Y_seq, dim=0)
-    YY = YY[:, :, None]
+    # Create sequences for each split
+    X_test, Y_test = create_sequences(a_test_norm, start_offset=0)
+    X_train, Y_train = create_sequences(a_train_norm, start_offset=0)
+    X_val, Y_val = create_sequences(a_val_norm, start_offset=0)
     
-    # Create tensors
-    X_test = torch.Tensor.float(XX[:test_len, :, :]).cuda()
-    Y_test = torch.Tensor.float(YY[:test_len, :, :]).cuda()
+    # Create tensors and move to GPU
+    X_test = torch.Tensor.float(X_test).cuda() if X_test is not None else None
+    Y_test = torch.Tensor.float(Y_test).cuda() if Y_test is not None else None
     
-    X_train = torch.Tensor.float(XX[test_len:test_len+train_len, :, :]).cuda()
-    Y_train = torch.Tensor.float(YY[test_len:test_len+train_len, :, :]).cuda()
+    X_train = torch.Tensor.float(X_train).cuda() if X_train is not None else None
+    Y_train = torch.Tensor.float(Y_train).cuda() if Y_train is not None else None
     
-    X_val = torch.Tensor.float(XX[-val_len:, :, :]).cuda()
-    Y_val = torch.Tensor.float(YY[-val_len:, :, :]).cuda()
+    X_val = torch.Tensor.float(X_val).cuda() if X_val is not None else None
+    Y_val = torch.Tensor.float(Y_val).cuda() if Y_val is not None else None
+    
+    # Get number of features (from X_train which should always exist)
+    num_features = X_train.shape[2] if X_train is not None else a.shape[1] - 1
     
     # Create data loaders
     train_loader = data_loader(X_train, Y_train, 64, shuffle=False, drop_last=False)
     val_loader = data_loader(X_val, Y_val, 64, shuffle=False, drop_last=False)
     test_loader = data_loader(X_test, Y_test, 64, shuffle=False, drop_last=False)
     
-    return train_loader, val_loader, test_loader, mmn, XX.shape[2]
+    return train_loader, val_loader, test_loader, mmn, num_features
